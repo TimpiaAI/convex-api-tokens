@@ -1,4 +1,3 @@
-import type { GenericDataModel } from "convex/server";
 import type { api } from "../component/_generated/api.js";
 
 type ComponentApi = typeof api;
@@ -18,13 +17,6 @@ interface RunQueryCtx {
   ) => Promise<Returns>;
 }
 
-interface RunActionCtx {
-  runAction: <Args extends Record<string, any>, Returns>(
-    ref: any,
-    args: Args
-  ) => Promise<Returns>;
-}
-
 // ─── Result Types ────────────────────────────────────────────────
 
 export interface CreateTokenResult {
@@ -33,11 +25,11 @@ export interface CreateTokenResult {
   tokenId: string;
 }
 
-export interface ValidateTokenResult {
+export interface ValidateTokenResult<M = any> {
   ok: boolean;
   reason?: "expired" | "idle_timeout" | "revoked" | "invalid";
   namespace?: string;
-  metadata?: any;
+  metadata?: M;
   tokenId?: string;
 }
 
@@ -49,12 +41,12 @@ export interface RefreshTokenResult {
   reason?: string;
 }
 
-export interface TokenInfo {
+export interface TokenInfo<M = any> {
   tokenId: string;
   tokenPrefix: string;
   name?: string;
   namespace: string;
-  metadata?: any;
+  metadata?: M;
   expiresAt?: number;
   maxIdleMs?: number;
   lastUsedAt: number;
@@ -69,41 +61,53 @@ export interface EncryptedKeyInfo {
   updatedAt: number;
 }
 
-// ─── Main Client Class ──────────────────────────────────────────
+// ─── Options ─────────────────────────────────────────────────────
 
-export interface ApiTokensOptions {
+export interface ApiTokensOptions<M = any> {
   /**
    * Environment variable name containing the encryption key
    * for third-party key storage. Defaults to "API_TOKENS_ENCRYPTION_KEY".
    */
   encryptionKeyEnvVar?: string;
+
+  /**
+   * Optional callback invoked after a token is revoked.
+   * Called for invalidate, invalidateById, and invalidateAll.
+   * Runs in the caller's mutation context.
+   */
+  onInvalidate?: (info: {
+    namespace?: string;
+    tokenId?: string;
+    count?: number;
+    method: "invalidate" | "invalidateById" | "invalidateAll";
+  }) => void | Promise<void>;
 }
+
+// ─── Main Client Class ──────────────────────────────────────────
 
 /**
  * Client for the API Token Management component.
  *
- * Usage:
+ * Supports TypeScript generics for typed metadata:
  * ```ts
- * import { ApiTokens } from "convex-api-tokens";
- * import { components } from "./_generated/server.js";
+ * type MyMeta = { scopes: string[]; orgId: string };
+ * const apiTokens = new ApiTokens<MyMeta>(components.apiTokens);
  *
- * const apiTokens = new ApiTokens(components.apiTokens);
- *
- * // In your mutation:
- * const result = await apiTokens.create(ctx, {
- *   namespace: userId,
- *   name: "My API Key",
- * });
+ * // metadata is now typed as MyMeta
+ * const result = await apiTokens.validate(ctx, { token });
+ * result.metadata?.scopes; // string[]
  * ```
  */
-export class ApiTokens {
+export class ApiTokens<M = any> {
   public component: ComponentApi;
   private encryptionKeyEnvVar: string;
+  private onInvalidate?: ApiTokensOptions<M>["onInvalidate"];
 
-  constructor(component: ComponentApi, options?: ApiTokensOptions) {
+  constructor(component: ComponentApi, options?: ApiTokensOptions<M>) {
     this.component = component;
     this.encryptionKeyEnvVar =
       options?.encryptionKeyEnvVar ?? "API_TOKENS_ENCRYPTION_KEY";
+    this.onInvalidate = options?.onInvalidate;
   }
 
   // ─── Token Operations ────────────────────────────────────────
@@ -117,7 +121,7 @@ export class ApiTokens {
     args: {
       namespace: string;
       name?: string;
-      metadata?: any;
+      metadata?: M;
       expiresAt?: number;
       maxIdleMs?: number;
     }
@@ -132,7 +136,7 @@ export class ApiTokens {
   async validate(
     ctx: RunMutationCtx,
     args: { token: string }
-  ): Promise<ValidateTokenResult> {
+  ): Promise<ValidateTokenResult<M>> {
     return await ctx.runMutation(this.component.public.validate, args);
   }
 
@@ -158,28 +162,46 @@ export class ApiTokens {
 
   /**
    * Revoke a single token by its raw value.
+   * Triggers the onInvalidate callback if configured.
    */
   async invalidate(
     ctx: RunMutationCtx,
     args: { token: string }
   ): Promise<boolean> {
-    return await ctx.runMutation(this.component.public.invalidate, args);
+    const result = await ctx.runMutation(
+      this.component.public.invalidate,
+      args
+    ) as boolean;
+    if (result && this.onInvalidate) {
+      await this.onInvalidate({ method: "invalidate" });
+    }
+    return result;
   }
 
   /**
    * Revoke a token by its document ID (for admin dashboards).
+   * Triggers the onInvalidate callback if configured.
    */
   async invalidateById(
     ctx: RunMutationCtx,
     args: { tokenId: string }
   ): Promise<boolean> {
-    return await ctx.runMutation(this.component.public.invalidateById, {
-      tokenId: args.tokenId,
-    });
+    const result = await ctx.runMutation(
+      this.component.public.invalidateById,
+      { tokenId: args.tokenId }
+    ) as boolean;
+    if (result && this.onInvalidate) {
+      await this.onInvalidate({
+        method: "invalidateById",
+        tokenId: args.tokenId,
+      });
+    }
+    return result;
   }
 
   /**
    * Bulk revoke tokens with optional filters.
+   * Triggers the onInvalidate callback if configured.
    */
   async invalidateAll(
     ctx: RunMutationCtx,
@@ -189,7 +211,18 @@ export class ApiTokens {
       after?: number;
     }
   ): Promise<number> {
-    return await ctx.runMutation(this.component.public.invalidateAll, args);
+    const count = await ctx.runMutation(
+      this.component.public.invalidateAll,
+      args
+    ) as number;
+    if (count > 0 && this.onInvalidate) {
+      await this.onInvalidate({
+        method: "invalidateAll",
+        namespace: args.namespace,
+        count,
+      });
+    }
+    return count;
   }
 
   /**
@@ -202,15 +235,29 @@ export class ApiTokens {
       namespace: string;
       includeRevoked?: boolean;
     }
-  ): Promise<TokenInfo[]> {
+  ): Promise<TokenInfo<M>[]> {
     return await ctx.runQuery(this.component.public.list, args);
+  }
+
+  /**
+   * Clean up expired and revoked tokens older than a threshold.
+   * Call this on a schedule (e.g. daily cron) to keep the database clean.
+   *
+   * @param olderThanMs - Delete tokens older than this (default: 30 days)
+   * @returns Number of tokens deleted
+   */
+  async cleanup(
+    ctx: RunMutationCtx,
+    args?: { olderThanMs?: number }
+  ): Promise<number> {
+    return await ctx.runMutation(this.component.public.cleanup, args ?? {});
   }
 
   // ─── Encrypted Key Storage ───────────────────────────────────
 
   /**
    * Store an encrypted third-party API key.
-   * The value is encrypted with AES-256-GCM before storage.
+   * The value should be encrypted with encryptValue() before storage.
    */
   async storeEncrypted(
     ctx: RunMutationCtx,
@@ -225,7 +272,7 @@ export class ApiTokens {
   }
 
   /**
-   * Get an encrypted key record (still encrypted — decrypt in your action).
+   * Get an encrypted key record (still encrypted — decrypt with decryptValue()).
    */
   async getEncryptedKey(
     ctx: RunQueryCtx,
@@ -233,7 +280,12 @@ export class ApiTokens {
       namespace: string;
       keyName: string;
     }
-  ): Promise<{ encryptedValue: string; iv: string; createdAt: number; updatedAt: number } | null> {
+  ): Promise<{
+    encryptedValue: string;
+    iv: string;
+    createdAt: number;
+    updatedAt: number;
+  } | null> {
     return await ctx.runQuery(this.component.public.getEncryptedKey, args);
   }
 
@@ -247,7 +299,10 @@ export class ApiTokens {
       keyName: string;
     }
   ): Promise<boolean> {
-    return await ctx.runMutation(this.component.public.deleteEncryptedKey, args);
+    return await ctx.runMutation(
+      this.component.public.deleteEncryptedKey,
+      args
+    );
   }
 
   /**
@@ -263,7 +318,7 @@ export class ApiTokens {
   }
 }
 
-// ─── Middleware Helper ────────────────────────────────────────────
+// ─── Middleware Helpers ──────────────────────────────────────────
 
 /**
  * Create token-authenticated middleware for HTTP endpoints.
@@ -271,33 +326,27 @@ export class ApiTokens {
  * Usage:
  * ```ts
  * import { createTokenAuth } from "convex-api-tokens";
- * import { components } from "./_generated/server.js";
+ * import { components } from "./_generated/api.js";
  *
  * const withApiToken = createTokenAuth(components.apiTokens);
  *
- * export default httpRouter((router) => {
- *   router.route({
- *     path: "/api/data",
- *     method: "GET",
- *     handler: httpAction(async (ctx, request) => {
- *       const auth = await withApiToken(ctx, request);
- *       if (!auth.ok) {
- *         return new Response(JSON.stringify({ error: auth.reason }), {
- *           status: 401,
- *           headers: { "Content-Type": "application/json" },
- *         });
- *       }
- *       // auth.namespace and auth.metadata are available
- *     }),
- *   });
+ * export const myEndpoint = httpAction(async (ctx, request) => {
+ *   const auth = await withApiToken(ctx, request);
+ *   if (!auth.ok) {
+ *     return new Response(JSON.stringify({ error: auth.reason }), {
+ *       status: 401,
+ *       headers: { "Content-Type": "application/json" },
+ *     });
+ *   }
+ *   // auth.namespace and auth.metadata available
  * });
  * ```
  */
-export function createTokenAuth(component: ComponentApi) {
+export function createTokenAuth<M = any>(component: ComponentApi) {
   return async (
     ctx: RunMutationCtx,
     request: Request
-  ): Promise<ValidateTokenResult & { ok: boolean }> => {
+  ): Promise<ValidateTokenResult<M>> => {
     const authHeader = request.headers.get("Authorization");
     if (!authHeader?.startsWith("Bearer ")) {
       return {
@@ -311,11 +360,55 @@ export function createTokenAuth(component: ComponentApi) {
   };
 }
 
+/**
+ * Helper to protect a mutation handler with token authentication.
+ * Extracts the token from args, validates it, and passes auth info to handler.
+ *
+ * Usage:
+ * ```ts
+ * import { withTokenAuth } from "convex-api-tokens";
+ *
+ * const apiTokens = new ApiTokens(components.apiTokens);
+ *
+ * export const protectedMutation = mutation({
+ *   args: { token: v.string(), data: v.string() },
+ *   handler: withTokenAuth(apiTokens, async (ctx, args, auth) => {
+ *     // auth = { namespace, metadata, tokenId }
+ *     // args still has { token, data }
+ *     return { saved: true, user: auth.namespace };
+ *   }),
+ * });
+ * ```
+ */
+export function withTokenAuth<M = any, Args extends { token: string } = any>(
+  apiTokens: ApiTokens<M>,
+  handler: (
+    ctx: any,
+    args: Args,
+    auth: { namespace: string; metadata?: M; tokenId: string }
+  ) => any
+) {
+  return async (ctx: any, args: Args) => {
+    const result = await apiTokens.validate(ctx, { token: args.token });
+    if (!result.ok) {
+      throw new Error(`Unauthorized: ${result.reason}`);
+    }
+    return handler(ctx, args, {
+      namespace: result.namespace!,
+      metadata: result.metadata,
+      tokenId: result.tokenId!,
+    });
+  };
+}
+
 // ─── Encryption Utilities (for use in actions) ───────────────────
 
 /**
  * Encrypt a value using AES-256-GCM. Use this in your actions before
  * calling apiTokens.storeEncrypted().
+ *
+ * Note: Encryption requires crypto.subtle which is available in Convex
+ * actions. For mutations/queries, store the encrypted value directly.
  */
 export async function encryptValue(
   plaintext: string,
@@ -356,6 +449,10 @@ export async function encryptValue(
 /**
  * Decrypt a value using AES-256-GCM. Use this in your actions after
  * calling apiTokens.getEncryptedKey().
+ *
+ * Note: Decryption requires crypto.subtle which is available in Convex
+ * actions. For mutations/queries, retrieve the encrypted record and
+ * decrypt in a separate action.
  */
 export async function decryptValue(
   encryptedValue: string,

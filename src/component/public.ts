@@ -1,4 +1,4 @@
-import { mutation, query, action, internalMutation } from "./_generated/server.js";
+import { mutation, query } from "./_generated/server.js";
 import { v } from "convex/values";
 import { Id } from "./_generated/dataModel.js";
 
@@ -376,11 +376,13 @@ export const list = query({
 
 /**
  * Clean up expired and revoked tokens older than a threshold.
+ * Can be called from the client or scheduled via cron.
  */
-export const cleanup = internalMutation({
+export const cleanup = mutation({
   args: {
     olderThanMs: v.optional(v.number()),
   },
+  returns: v.number(),
   handler: async (ctx, args) => {
     const threshold = args.olderThanMs ?? 30 * 24 * 60 * 60 * 1000; // 30 days default
     const cutoff = Date.now() - threshold;

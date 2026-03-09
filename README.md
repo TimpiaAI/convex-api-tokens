@@ -18,7 +18,10 @@ Built for SaaS apps that need to issue API keys to users, validate them on incom
 - **Encrypted Key Storage** — AES-256-GCM encrypted storage for third-party API keys (Stripe, OpenAI, etc.)
 - **Token Listing** — Admin/dashboard queries for token management (never exposes raw tokens)
 - **HTTP Middleware** — `createTokenAuth()` helper for protecting HTTP endpoints
-- **Automatic Cleanup** — Built-in cleanup for expired/revoked tokens
+- **Mutation Middleware** — `withTokenAuth()` helper for protecting mutations with token auth
+- **Automatic Cleanup** — Public cleanup mutation for scheduled garbage collection
+- **Invalidation Callbacks** — `onInvalidate` hook notifies your app when tokens are revoked
+- **TypeScript Generics** — Typed metadata with `ApiTokens<MyMeta>` for full type safety
 
 ## Installation
 
@@ -153,6 +156,87 @@ export const listTokens = query({
 });
 ```
 
+### Protect mutations with token auth
+
+Use `withTokenAuth()` to automatically validate a token and pass auth info to your handler:
+
+```ts
+import { withTokenAuth } from "convex-api-tokens";
+import { v } from "convex/values";
+
+export const protectedMutation = mutation({
+  args: { token: v.string(), data: v.string() },
+  handler: withTokenAuth(apiTokens, async (ctx, args, auth) => {
+    // auth = { namespace, metadata, tokenId }
+    // Throws "Unauthorized: <reason>" if token is invalid
+    return { saved: true, user: auth.namespace };
+  }),
+});
+```
+
+### Schedule automatic cleanup
+
+Call `cleanup()` from a scheduled function or cron to delete old revoked/expired tokens:
+
+```ts
+// In a cron job (convex/crons.ts)
+import { cronJobs } from "convex/server";
+import { internal } from "./_generated/api.js";
+
+const crons = cronJobs();
+crons.daily("cleanup tokens", { hourUTC: 3, minuteUTC: 0 }, internal.tokens.cleanupExpired);
+export default crons;
+
+// In your tokens file
+export const cleanupExpired = internalMutation({
+  handler: async (ctx) => {
+    const deleted = await apiTokens.cleanup(ctx, {
+      olderThanMs: 30 * 24 * 60 * 60 * 1000, // 30 days
+    });
+    console.log(`Cleaned up ${deleted} expired tokens`);
+  },
+});
+```
+
+### Invalidation callbacks
+
+Get notified when tokens are revoked:
+
+```ts
+const apiTokens = new ApiTokens(components.apiTokens, {
+  onInvalidate: async (info) => {
+    console.log(`Token ${info.method}: namespace=${info.namespace}`);
+    // info.method: "invalidate" | "invalidateById" | "invalidateAll"
+    // info.tokenId: set for invalidateById
+    // info.count: set for invalidateAll
+    // info.namespace: set when available
+  },
+});
+```
+
+### TypeScript generics for typed metadata
+
+```ts
+// Define your metadata type
+type TokenMeta = {
+  scopes: ("read" | "write" | "admin")[];
+  orgId: string;
+};
+
+// Pass it as a generic
+const apiTokens = new ApiTokens<TokenMeta>(components.apiTokens);
+
+// Now metadata is typed everywhere
+const result = await apiTokens.validate(ctx, { token });
+if (result.ok) {
+  result.metadata?.scopes; // ("read" | "write" | "admin")[]
+  result.metadata?.orgId;  // string
+}
+
+const tokens = await apiTokens.list(ctx, { namespace: userId });
+tokens[0].metadata?.scopes; // typed!
+```
+
 ### Store third-party API keys
 
 ```ts
@@ -190,6 +274,8 @@ export const getApiKey = action({
 });
 ```
 
+> **Note:** Encryption/decryption uses `crypto.subtle` which requires a Convex action context. For mutations and queries, store/retrieve the already-encrypted values and decrypt in a separate action.
+
 ### Protect HTTP endpoints
 
 ```ts
@@ -210,9 +296,21 @@ export const myEndpoint = httpAction(async (ctx, request) => {
 });
 ```
 
+### Namespace as user ID
+
+Namespaces are strings that group tokens by owner. Convert non-string IDs:
+
+```ts
+// Convex user ID (already a string)
+await apiTokens.create(ctx, { namespace: userId, ... });
+
+// Numeric ID — convert to string
+await apiTokens.create(ctx, { namespace: String(orgId), ... });
+```
+
 ## API Reference
 
-### `ApiTokens` class
+### `ApiTokens<M>` class
 
 | Method | Context | Description |
 |--------|---------|-------------|
@@ -224,18 +322,20 @@ export const myEndpoint = httpAction(async (ctx, request) => {
 | `invalidateById(ctx, args)` | mutation | Revoke by token ID |
 | `invalidateAll(ctx, args)` | mutation | Bulk revoke with filters |
 | `list(ctx, args)` | query | List tokens for namespace |
+| `cleanup(ctx, args?)` | mutation | Delete old revoked/expired tokens |
 | `storeEncrypted(ctx, args)` | mutation | Store encrypted third-party key |
 | `getEncryptedKey(ctx, args)` | query | Get encrypted key record |
 | `deleteEncrypted(ctx, args)` | mutation | Delete encrypted key |
 | `listEncryptedKeys(ctx, args)` | query | List key names for namespace |
 
-### `createTokenAuth(component)`
+### Standalone helpers
 
-Returns `(ctx, request) => Promise<ValidateTokenResult>` for HTTP endpoint auth.
-
-### `encryptValue(plaintext, secret)` / `decryptValue(encrypted, iv, secret)`
-
-AES-256-GCM encryption utilities for use in Convex actions.
+| Function | Description |
+|----------|-------------|
+| `createTokenAuth(component)` | HTTP middleware — returns `(ctx, request) => ValidateTokenResult` |
+| `withTokenAuth(apiTokens, handler)` | Mutation middleware — validates token from args, passes auth to handler |
+| `encryptValue(plaintext, secret)` | AES-256-GCM encryption (for actions) |
+| `decryptValue(encrypted, iv, secret)` | AES-256-GCM decryption (for actions) |
 
 ## Security
 
