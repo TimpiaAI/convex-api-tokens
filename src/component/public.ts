@@ -1,4 +1,4 @@
-import { mutation, query, internalMutation } from "./_generated/server.js";
+import { mutation, query } from "./_generated/server.js";
 import { v } from "convex/values";
 
 // ─── Token Helpers ───────────────────────────────────────────────
@@ -460,32 +460,6 @@ export const cleanup = mutation({
     // Delete revoked tokens older than threshold
     const revokedTokens = await ctx.db.query("tokens").collect();
     for (const token of revokedTokens) {
-      const shouldDelete =
-        (token.revoked && token.createdAt < cutoff) ||
-        (token.expiresAt && token.expiresAt < cutoff);
-
-      if (shouldDelete) {
-        await ctx.db.delete(token._id);
-        deleted++;
-      }
-    }
-
-    return deleted;
-  },
-});
-
-/**
- * Internal cleanup mutation for cron scheduling.
- */
-export const cleanupCron = internalMutation({
-  args: {},
-  handler: async (ctx) => {
-    const threshold = 30 * 24 * 60 * 60 * 1000; // 30 days
-    const cutoff = Date.now() - threshold;
-    let deleted = 0;
-
-    const tokens = await ctx.db.query("tokens").collect();
-    for (const token of tokens) {
       const shouldDelete =
         (token.revoked && token.createdAt < cutoff) ||
         (token.expiresAt && token.expiresAt < cutoff);

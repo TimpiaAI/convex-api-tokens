@@ -1,6 +1,6 @@
 {
   "name": "convex-api-tokens",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Convex component for API token management: issuance, validation, rotation, revocation, and encrypted third-party key storage",
   "type": "module",
   "license": "MIT",

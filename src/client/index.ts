@@ -256,7 +256,7 @@ export class ApiTokens<M = any> {
   /**
    * Clean up expired and revoked tokens older than a threshold.
    * Call this on a schedule (e.g. daily cron) to keep the database clean.
-   * A built-in daily cron also runs automatically at 3:00 UTC.
+   * Set up a cron in your app's convex/crons.ts to automate this.
    *
    * @param olderThanMs - Delete tokens older than this (default: 30 days)
    * @returns Number of tokens deleted
