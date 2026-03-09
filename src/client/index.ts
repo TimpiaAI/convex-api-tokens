@@ -84,7 +84,7 @@ export interface ApiTokensOptions {
  *
  * Usage:
  * ```ts
- * import { ApiTokens } from "@ovipi/convex-api-tokens";
+ * import { ApiTokens } from "convex-api-tokens";
  * import { components } from "./_generated/server.js";
  *
  * const apiTokens = new ApiTokens(components.apiTokens);
@@ -270,7 +270,7 @@ export class ApiTokens {
  *
  * Usage:
  * ```ts
- * import { createTokenAuth } from "@ovipi/convex-api-tokens";
+ * import { createTokenAuth } from "convex-api-tokens";
  * import { components } from "./_generated/server.js";
  *
  * const withApiToken = createTokenAuth(components.apiTokens);

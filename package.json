@@ -1,6 +1,6 @@
 {
-  "name": "@ovipi/convex-api-tokens",
-  "version": "0.1.0",
+  "name": "convex-api-tokens",
+  "version": "0.1.1",
   "description": "Convex component for API token management: issuance, validation, rotation, revocation, and encrypted third-party key storage",
   "type": "module",
   "license": "MIT",
@@ -51,5 +51,14 @@
     "authentication",
     "token-management",
     "saas"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TimpiaAI/convex-api-tokens.git"
+  },
+  "homepage": "https://github.com/TimpiaAI/convex-api-tokens#readme",
+  "bugs": {
+    "url": "https://github.com/TimpiaAI/convex-api-tokens/issues"
+  },
+  "author": "TimpiaAI"
 }

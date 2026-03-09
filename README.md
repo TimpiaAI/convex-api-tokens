@@ -1,13 +1,18 @@
-# @ovipi/convex-api-tokens
+# convex-api-tokens
 
-A Convex component for **API token management** — issuance, validation, rotation, revocation, and encrypted third-party key storage.
+[![npm](https://img.shields.io/npm/v/convex-api-tokens)](https://www.npmjs.com/package/convex-api-tokens)
+[![license](https://img.shields.io/npm/l/convex-api-tokens)](https://github.com/TimpiaAI/convex-api-tokens/blob/main/LICENSE)
+
+A [Convex](https://convex.dev) component for **API token management** — issuance, validation, rotation, revocation, and encrypted third-party key storage.
 
 Built for SaaS apps that need to issue API keys to users, validate them on incoming requests, and securely store third-party credentials.
+
+> **Convex Components Challenge** — Issue [#12](https://github.com/get-convex/components-submissions-directory/issues/12): API Token Management
 
 ## Features
 
 - **Token Issuance** — Generate `sk_`-prefixed tokens with namespaces, expiration, idle timeouts, and metadata
-- **Token Validation** — Validate tokens with detailed failure reasons (expired, idle, revoked, invalid)
+- **Token Validation** — Validate tokens with detailed failure reasons (`expired`, `idle_timeout`, `revoked`, `invalid`)
 - **Token Rotation** — Refresh tokens while preserving metadata and audit trail
 - **Bulk Revocation** — Revoke by namespace, time range, or individual token
 - **Encrypted Key Storage** — AES-256-GCM encrypted storage for third-party API keys (Stripe, OpenAI, etc.)
@@ -18,7 +23,7 @@ Built for SaaS apps that need to issue API keys to users, validate them on incom
 ## Installation
 
 ```bash
-npm install @ovipi/convex-api-tokens
+npm install convex-api-tokens
 ```
 
 ## Setup
@@ -28,7 +33,7 @@ npm install @ovipi/convex-api-tokens
 ```ts
 // convex/convex.config.ts
 import { defineApp } from "convex/server";
-import apiTokens from "@ovipi/convex-api-tokens/convex.config";
+import apiTokens from "convex-api-tokens/convex.config";
 
 const app = defineApp();
 app.use(apiTokens);
@@ -40,10 +45,8 @@ export default app;
 
 ```ts
 // convex/tokens.ts
-import { ApiTokens } from "@ovipi/convex-api-tokens";
+import { ApiTokens } from "convex-api-tokens";
 import { components } from "./_generated/server.js";
-import { mutation, query } from "./_generated/server.js";
-import { v } from "convex/values";
 
 const apiTokens = new ApiTokens(components.apiTokens);
 ```
@@ -61,12 +64,15 @@ API_TOKENS_ENCRYPTION_KEY=your-secret-key-here
 ### Create a token
 
 ```ts
+import { mutation } from "./_generated/server.js";
+import { v } from "convex/values";
+
 export const createToken = mutation({
   args: { name: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
 
-    const result = await ctx.runMutation(apiTokens.create, {
+    const result = await apiTokens.create(ctx, {
       namespace: userId,
       name: args.name ?? "My API Key",
       metadata: { scopes: ["read", "write"] },
@@ -87,12 +93,11 @@ export const createToken = mutation({
 export const validateToken = mutation({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    const result = await ctx.runMutation(apiTokens.validate, {
-      token: args.token,
-    });
+    const result = await apiTokens.validate(ctx, { token: args.token });
 
     if (!result.ok) {
       throw new Error(`Token invalid: ${result.reason}`);
+      // reason: "expired" | "idle_timeout" | "revoked" | "invalid"
     }
 
     return { namespace: result.namespace, metadata: result.metadata };
@@ -106,9 +111,7 @@ export const validateToken = mutation({
 export const rotateToken = mutation({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    const result = await ctx.runMutation(apiTokens.refresh, {
-      token: args.token,
-    });
+    const result = await apiTokens.refresh(ctx, { token: args.token });
 
     if (!result.ok) throw new Error(result.reason);
     return result; // { token, tokenPrefix, tokenId }
@@ -119,14 +122,17 @@ export const rotateToken = mutation({
 ### Revoke tokens
 
 ```ts
-// Single token
-await ctx.runMutation(apiTokens.invalidate, { token: rawToken });
+// Single token by raw value
+await apiTokens.invalidate(ctx, { token: rawToken });
+
+// Single token by ID (admin dashboard)
+await apiTokens.invalidateById(ctx, { tokenId: "token_id_here" });
 
 // All tokens for a user
-await ctx.runMutation(apiTokens.invalidateAll, { namespace: userId });
+await apiTokens.invalidateAll(ctx, { namespace: userId });
 
 // All tokens created before a date
-await ctx.runMutation(apiTokens.invalidateAll, {
+await apiTokens.invalidateAll(ctx, {
   namespace: userId,
   before: Date.now() - 90 * 24 * 60 * 60 * 1000,
 });
@@ -139,7 +145,7 @@ export const listTokens = query({
   args: {},
   handler: async (ctx) => {
     const userId = await getAuthUserId(ctx);
-    return await ctx.runQuery(apiTokens.list, {
+    return await apiTokens.list(ctx, {
       namespace: userId,
       includeRevoked: false,
     });
@@ -150,34 +156,57 @@ export const listTokens = query({
 ### Store third-party API keys
 
 ```ts
-// Store encrypted
-await ctx.runAction(apiTokens.storeEncrypted, {
-  namespace: userId,
-  keyName: "stripe_secret",
-  value: "sk_live_...",
+import { encryptValue, decryptValue } from "convex-api-tokens";
+
+// In an action — encrypt and store
+export const storeApiKey = action({
+  args: { keyName: v.string(), value: v.string() },
+  handler: async (ctx, args) => {
+    const secret = process.env.API_TOKENS_ENCRYPTION_KEY!;
+    const { encryptedValue, iv } = await encryptValue(args.value, secret);
+
+    await apiTokens.storeEncrypted(ctx, {
+      namespace: "my_app",
+      keyName: args.keyName,
+      encryptedValue,
+      iv,
+    });
+  },
 });
 
-// Retrieve decrypted
-const key = await ctx.runAction(apiTokens.getDecrypted, {
-  namespace: userId,
-  keyName: "stripe_secret",
+// In an action — retrieve and decrypt
+export const getApiKey = action({
+  args: { keyName: v.string() },
+  handler: async (ctx, args) => {
+    const secret = process.env.API_TOKENS_ENCRYPTION_KEY!;
+    const record = await apiTokens.getEncryptedKey(ctx, {
+      namespace: "my_app",
+      keyName: args.keyName,
+    });
+
+    if (!record) return null;
+    return await decryptValue(record.encryptedValue, record.iv, secret);
+  },
 });
 ```
 
 ### Protect HTTP endpoints
 
 ```ts
-import { createTokenAuth } from "@ovipi/convex-api-tokens";
-import { components } from "./_generated/server.js";
+import { createTokenAuth } from "convex-api-tokens";
 
 const withApiToken = createTokenAuth(components.apiTokens);
 
 export const myEndpoint = httpAction(async (ctx, request) => {
   const auth = await withApiToken(ctx, request);
   if (!auth.ok) {
-    return new Response("Unauthorized", { status: 401 });
+    return new Response(JSON.stringify({ error: auth.reason }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
   }
-  // auth.namespace and auth.metadata available
+  // auth.namespace and auth.metadata available here
+  return new Response(JSON.stringify({ user: auth.namespace }));
 });
 ```
 
@@ -185,32 +214,45 @@ export const myEndpoint = httpAction(async (ctx, request) => {
 
 ### `ApiTokens` class
 
-| Method | Type | Description |
-|--------|------|-------------|
-| `create` | mutation | Issue a new token |
-| `validate` | mutation | Validate and touch a token |
-| `touch` | mutation | Reset idle timeout |
-| `refresh` | mutation | Rotate token, preserve metadata |
-| `invalidate` | mutation | Revoke single token |
-| `invalidateById` | mutation | Revoke by token ID |
-| `invalidateAll` | mutation | Bulk revoke with filters |
-| `list` | query | List tokens for namespace |
-| `storeEncrypted` | action | Store encrypted third-party key |
-| `getDecrypted` | action | Retrieve decrypted key |
-| `deleteEncrypted` | mutation | Delete encrypted key |
-| `listEncryptedKeys` | query | List key names for namespace |
+| Method | Context | Description |
+|--------|---------|-------------|
+| `create(ctx, args)` | mutation | Issue a new token |
+| `validate(ctx, args)` | mutation | Validate and touch a token |
+| `touch(ctx, args)` | mutation | Reset idle timeout |
+| `refresh(ctx, args)` | mutation | Rotate token, preserve metadata |
+| `invalidate(ctx, args)` | mutation | Revoke single token by value |
+| `invalidateById(ctx, args)` | mutation | Revoke by token ID |
+| `invalidateAll(ctx, args)` | mutation | Bulk revoke with filters |
+| `list(ctx, args)` | query | List tokens for namespace |
+| `storeEncrypted(ctx, args)` | mutation | Store encrypted third-party key |
+| `getEncryptedKey(ctx, args)` | query | Get encrypted key record |
+| `deleteEncrypted(ctx, args)` | mutation | Delete encrypted key |
+| `listEncryptedKeys(ctx, args)` | query | List key names for namespace |
 
 ### `createTokenAuth(component)`
 
-Returns a function `(ctx, request) => Promise<ValidationResult>` for HTTP endpoint auth.
+Returns `(ctx, request) => Promise<ValidateTokenResult>` for HTTP endpoint auth.
+
+### `encryptValue(plaintext, secret)` / `decryptValue(encrypted, iv, secret)`
+
+AES-256-GCM encryption utilities for use in Convex actions.
 
 ## Security
 
 - Tokens are **SHA-256 hashed** before storage — raw tokens are never persisted
-- Third-party keys use **AES-256-GCM** encryption with PBKDF2 key derivation
+- Third-party keys use **AES-256-GCM** encryption with PBKDF2 key derivation (100,000 iterations)
 - Token prefixes (`sk_ab12...ef56`) are stored for display without exposing the full token
-- Component tables are **isolated** — your app code cannot accidentally read them
+- Component tables are **isolated** — your app code cannot accidentally access them
+- Random IVs ensure identical plaintexts produce different ciphertexts
+
+## Demo
+
+See the [example app](https://github.com/TimpiaAI/convex-api-tokens/tree/main/example) for a complete working integration.
+
+## Author
+
+Built and maintained by [TimpiaAI](https://github.com/TimpiaAI).
 
 ## License
 
-MIT
+[MIT](https://github.com/TimpiaAI/convex-api-tokens/blob/main/LICENSE)
