@@ -46,7 +46,7 @@ export default app;
 ```ts
 // convex/tokens.ts
 import { ApiTokens } from "convex-api-tokens";
-import { components } from "./_generated/server.js";
+import { components } from "./_generated/api.js";
 
 const apiTokens = new ApiTokens(components.apiTokens);
 ```
