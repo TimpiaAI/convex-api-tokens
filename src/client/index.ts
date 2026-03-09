@@ -89,24 +89,35 @@ export interface ApiTokensOptions<M = any> {
  * ```ts
  * type MyMeta = { scopes: string[]; orgId: string };
  * const apiTokens = new ApiTokens<MyMeta>(components.apiTokens);
- *
- * // metadata is now typed as MyMeta
- * const result = await apiTokens.validate(ctx, { token });
- * result.metadata?.scopes; // string[]
  * ```
  *
- * Namespace accepts any Convex value (string, number, Id, etc.):
+ * For encrypted key storage, pass the encryption key:
  * ```ts
- * await apiTokens.create(ctx, { namespace: userId, ... });
- * await apiTokens.create(ctx, { namespace: 42, ... });
+ * const apiTokens = new ApiTokens(components.apiTokens, {
+ *   API_TOKENS_ENCRYPTION_KEY: process.env.API_TOKENS_ENCRYPTION_KEY,
+ * });
  * ```
  */
 export class ApiTokens<M = any> {
   public component: ComponentApi;
   private onInvalidateFn?: any;
+  private encryptionKey?: string;
 
-  constructor(component: ComponentApi) {
+  constructor(
+    component: ComponentApi,
+    options?: {
+      /**
+       * Encryption key for third-party key storage.
+       * Read from process.env.API_TOKENS_ENCRYPTION_KEY by default.
+       * Pass explicitly if you use a different env var name.
+       */
+      API_TOKENS_ENCRYPTION_KEY?: string;
+    }
+  ) {
     this.component = component;
+    this.encryptionKey =
+      options?.API_TOKENS_ENCRYPTION_KEY ??
+      (typeof process !== "undefined" ? process.env?.API_TOKENS_ENCRYPTION_KEY : undefined);
   }
 
   /**
@@ -272,10 +283,11 @@ export class ApiTokens<M = any> {
 
   /**
    * Store a third-party API key (e.g. OpenAI, Stripe).
-   * The component encrypts the value server-side with AES-256-GCM
-   * using the API_TOKENS_ENCRYPTION_KEY env variable.
+   * The component encrypts the value server-side with AES-256-GCM.
+   * The encryption key is read from the constructor options or
+   * process.env.API_TOKENS_ENCRYPTION_KEY.
    *
-   * Works in mutations (no action required).
+   * Works in mutations and queries (no action required).
    */
   async storeKey(
     ctx: RunMutationCtx,
@@ -285,7 +297,16 @@ export class ApiTokens<M = any> {
       value: string;
     }
   ): Promise<void> {
-    await ctx.runMutation(this.component.public.storeValue, args);
+    if (!this.encryptionKey) {
+      throw new Error(
+        "API_TOKENS_ENCRYPTION_KEY is not set. Pass it in the ApiTokens constructor " +
+        "or set the environment variable."
+      );
+    }
+    await ctx.runMutation(this.component.public.storeValue, {
+      ...args,
+      encryptionKey: this.encryptionKey,
+    });
   }
 
   /**
@@ -301,7 +322,16 @@ export class ApiTokens<M = any> {
       keyName: string;
     }
   ): Promise<string | null> {
-    return await ctx.runQuery(this.component.public.getValue, args);
+    if (!this.encryptionKey) {
+      throw new Error(
+        "API_TOKENS_ENCRYPTION_KEY is not set. Pass it in the ApiTokens constructor " +
+        "or set the environment variable."
+      );
+    }
+    return await ctx.runQuery(this.component.public.getValue, {
+      ...args,
+      encryptionKey: this.encryptionKey,
+    });
   }
 
   /**

@@ -94,16 +94,8 @@ async function decryptInternal(
   return new TextDecoder().decode(decrypted);
 }
 
-function getEncryptionKey(): string {
-  const key = process.env.API_TOKENS_ENCRYPTION_KEY;
-  if (!key) {
-    throw new Error(
-      "API_TOKENS_ENCRYPTION_KEY environment variable is not set. " +
-      "Set it in your Convex dashboard for encrypted key storage."
-    );
-  }
-  return key;
-}
+// Note: Components cannot access process.env. The encryption key
+// is passed as an argument from the app layer via the client class.
 
 // ─── Token CRUD ──────────────────────────────────────────────────
 
@@ -334,14 +326,14 @@ export const invalidate = mutation({
  */
 export const invalidateById = mutation({
   args: {
-    tokenId: v.id("tokens"),
+    tokenId: v.string(),
   },
   returns: v.boolean(),
   handler: async (ctx, args) => {
-    const record = await ctx.db.get(args.tokenId);
+    const record = await ctx.db.get(args.tokenId as any);
     if (!record) return false;
 
-    await ctx.db.patch(args.tokenId, { revoked: true });
+    await ctx.db.patch(args.tokenId as any, { revoked: true });
     return true;
   },
 });
@@ -485,11 +477,11 @@ export const storeValue = mutation({
     namespace: v.any(),
     keyName: v.string(),
     value: v.string(),
+    encryptionKey: v.string(),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const secret = getEncryptionKey();
-    const { encryptedValue, iv } = await encryptInternal(args.value, secret);
+    const { encryptedValue, iv } = await encryptInternal(args.value, args.encryptionKey);
     const now = Date.now();
 
     const existing = await ctx.db
@@ -528,6 +520,7 @@ export const getValue = query({
   args: {
     namespace: v.any(),
     keyName: v.string(),
+    encryptionKey: v.string(),
   },
   returns: v.union(v.string(), v.null()),
   handler: async (ctx, args) => {
@@ -540,8 +533,7 @@ export const getValue = query({
 
     if (!record) return null;
 
-    const secret = getEncryptionKey();
-    return await decryptInternal(record.encryptedValue, record.iv, secret);
+    return await decryptInternal(record.encryptedValue, record.iv, args.encryptionKey);
   },
 });
 

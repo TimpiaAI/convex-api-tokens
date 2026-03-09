@@ -56,10 +56,12 @@ const apiTokens = new ApiTokens(components.apiTokens);
 
 ### 3. (Optional) Set encryption key for third-party key storage
 
-In your Convex dashboard, set the environment variable:
+In your Convex dashboard, set the environment variable `API_TOKENS_ENCRYPTION_KEY`, then pass it to the client:
 
-```
-API_TOKENS_ENCRYPTION_KEY=your-secret-key-here
+```ts
+const apiTokens = new ApiTokens(components.apiTokens, {
+  API_TOKENS_ENCRYPTION_KEY: process.env.API_TOKENS_ENCRYPTION_KEY,
+});
 ```
 
 ## Usage
@@ -239,42 +241,39 @@ tokens[0].metadata?.scopes; // typed!
 
 ### Store third-party API keys
 
-```ts
-import { encryptValue, decryptValue } from "convex-api-tokens";
+The simplest way — server-side encryption in mutations/queries (no action needed):
 
-// In an action — encrypt and store
-export const storeApiKey = action({
+```ts
+// Initialize with encryption key (reads from process.env in app context)
+const apiTokens = new ApiTokens(components.apiTokens, {
+  API_TOKENS_ENCRYPTION_KEY: process.env.API_TOKENS_ENCRYPTION_KEY,
+});
+
+// Store a key — encrypted automatically server-side
+export const storeApiKey = mutation({
   args: { keyName: v.string(), value: v.string() },
   handler: async (ctx, args) => {
-    const secret = process.env.API_TOKENS_ENCRYPTION_KEY!;
-    const { encryptedValue, iv } = await encryptValue(args.value, secret);
-
-    await apiTokens.storeEncrypted(ctx, {
+    await apiTokens.storeKey(ctx, {
       namespace: "my_app",
       keyName: args.keyName,
-      encryptedValue,
-      iv,
+      value: args.value,
     });
   },
 });
 
-// In an action — retrieve and decrypt
-export const getApiKey = action({
+// Retrieve a key — decrypted automatically server-side
+export const getApiKey = query({
   args: { keyName: v.string() },
   handler: async (ctx, args) => {
-    const secret = process.env.API_TOKENS_ENCRYPTION_KEY!;
-    const record = await apiTokens.getEncryptedKey(ctx, {
+    return await apiTokens.getKey(ctx, {
       namespace: "my_app",
       keyName: args.keyName,
     });
-
-    if (!record) return null;
-    return await decryptValue(record.encryptedValue, record.iv, secret);
   },
 });
 ```
 
-> **Note:** Encryption/decryption uses `crypto.subtle` which requires a Convex action context. For mutations and queries, store/retrieve the already-encrypted values and decrypt in a separate action.
+You can also use the lower-level `storeEncrypted`/`getEncryptedKey` + `encryptValue`/`decryptValue` utilities for manual encryption in actions.
 
 ### Protect HTTP endpoints
 
