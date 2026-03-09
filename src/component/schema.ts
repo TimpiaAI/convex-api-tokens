@@ -8,8 +8,8 @@ export default defineSchema({
     tokenHash: v.string(),
     // A prefix of the token for display (e.g. "sk_...abc")
     tokenPrefix: v.string(),
-    // Namespace for logical grouping (user ID, org ID, app name, etc.)
-    namespace: v.string(),
+    // Namespace for logical grouping — any Convex value (user ID, org ID, app name, etc.)
+    namespace: v.any(),
     // Optional human-readable name/label
     name: v.optional(v.string()),
     // Arbitrary metadata (scopes, permissions, etc.)
@@ -34,7 +34,7 @@ export default defineSchema({
 
   // Encrypted third-party API keys
   encryptedKeys: defineTable({
-    namespace: v.string(),
+    namespace: v.any(),
     keyName: v.string(),
     // Encrypted value (base64 encoded)
     encryptedValue: v.string(),
@@ -44,4 +44,11 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_namespace_keyName", ["namespace", "keyName"]),
+
+  // Component configuration (onInvalidate callback, etc.)
+  config: defineTable({
+    key: v.string(),
+    value: v.any(),
+  })
+    .index("by_key", ["key"]),
 });

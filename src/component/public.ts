@@ -1,6 +1,5 @@
-import { mutation, query } from "./_generated/server.js";
+import { mutation, query, internalMutation } from "./_generated/server.js";
 import { v } from "convex/values";
-import { Id } from "./_generated/dataModel.js";
 
 // ─── Token Helpers ───────────────────────────────────────────────
 
@@ -36,6 +35,76 @@ function getTokenPrefix(token: string): string {
   return `${token.slice(0, 7)}...${token.slice(-4)}`;
 }
 
+// ─── Encryption Helpers ──────────────────────────────────────────
+
+async function deriveKey(secret: string, usage: "encrypt" | "decrypt") {
+  const encoder = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "PBKDF2" },
+    false,
+    ["deriveKey"]
+  );
+  return await crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: encoder.encode("convex-api-tokens-salt"),
+      iterations: 100000,
+      hash: "SHA-256",
+    },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    [usage]
+  );
+}
+
+async function encryptInternal(
+  plaintext: string,
+  secret: string
+): Promise<{ encryptedValue: string; iv: string }> {
+  const encoder = new TextEncoder();
+  const key = await deriveKey(secret, "encrypt");
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    encoder.encode(plaintext)
+  );
+  return {
+    encryptedValue: btoa(String.fromCharCode(...new Uint8Array(encrypted))),
+    iv: btoa(String.fromCharCode(...iv)),
+  };
+}
+
+async function decryptInternal(
+  encryptedValue: string,
+  iv: string,
+  secret: string
+): Promise<string> {
+  const key = await deriveKey(secret, "decrypt");
+  const ivBytes = Uint8Array.from(atob(iv), (c) => c.charCodeAt(0));
+  const data = Uint8Array.from(atob(encryptedValue), (c) => c.charCodeAt(0));
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: ivBytes },
+    key,
+    data
+  );
+  return new TextDecoder().decode(decrypted);
+}
+
+function getEncryptionKey(): string {
+  const key = process.env.API_TOKENS_ENCRYPTION_KEY;
+  if (!key) {
+    throw new Error(
+      "API_TOKENS_ENCRYPTION_KEY environment variable is not set. " +
+      "Set it in your Convex dashboard for encrypted key storage."
+    );
+  }
+  return key;
+}
+
 // ─── Token CRUD ──────────────────────────────────────────────────
 
 /**
@@ -44,7 +113,7 @@ function getTokenPrefix(token: string): string {
  */
 export const create = mutation({
   args: {
-    namespace: v.string(),
+    namespace: v.any(),
     name: v.optional(v.string()),
     metadata: v.optional(v.any()),
     expiresAt: v.optional(v.number()),
@@ -99,7 +168,7 @@ export const validate = mutation({
         v.literal("invalid")
       )
     ),
-    namespace: v.optional(v.string()),
+    namespace: v.optional(v.any()),
     metadata: v.optional(v.any()),
     tokenId: v.optional(v.string()),
   }),
@@ -282,7 +351,7 @@ export const invalidateById = mutation({
  */
 export const invalidateAll = mutation({
   args: {
-    namespace: v.optional(v.string()),
+    namespace: v.optional(v.any()),
     before: v.optional(v.number()),
     after: v.optional(v.number()),
   },
@@ -290,11 +359,11 @@ export const invalidateAll = mutation({
   handler: async (ctx, args) => {
     let tokensQuery;
 
-    if (args.namespace) {
+    if (args.namespace !== undefined) {
       tokensQuery = ctx.db
         .query("tokens")
         .withIndex("by_namespace_revoked", (q) =>
-          q.eq("namespace", args.namespace!).eq("revoked", false)
+          q.eq("namespace", args.namespace).eq("revoked", false)
         );
     } else {
       tokensQuery = ctx.db.query("tokens");
@@ -323,7 +392,7 @@ export const invalidateAll = mutation({
  */
 export const list = query({
   args: {
-    namespace: v.string(),
+    namespace: v.any(),
     includeRevoked: v.optional(v.boolean()),
   },
   returns: v.array(
@@ -331,7 +400,7 @@ export const list = query({
       tokenId: v.string(),
       tokenPrefix: v.string(),
       name: v.optional(v.string()),
-      namespace: v.string(),
+      namespace: v.any(),
       metadata: v.optional(v.any()),
       expiresAt: v.optional(v.number()),
       maxIdleMs: v.optional(v.number()),
@@ -405,15 +474,110 @@ export const cleanup = mutation({
   },
 });
 
-// ─── Encrypted Key Storage ───────────────────────────────────────
+/**
+ * Internal cleanup mutation for cron scheduling.
+ */
+export const cleanupCron = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const threshold = 30 * 24 * 60 * 60 * 1000; // 30 days
+    const cutoff = Date.now() - threshold;
+    let deleted = 0;
+
+    const tokens = await ctx.db.query("tokens").collect();
+    for (const token of tokens) {
+      const shouldDelete =
+        (token.revoked && token.createdAt < cutoff) ||
+        (token.expiresAt && token.expiresAt < cutoff);
+
+      if (shouldDelete) {
+        await ctx.db.delete(token._id);
+        deleted++;
+      }
+    }
+
+    return deleted;
+  },
+});
+
+// ─── Encrypted Key Storage (server-side encryption) ──────────────
 
 /**
- * Store an encrypted third-party API key.
- * Encryption happens in the action layer; this stores the result.
+ * Store a third-party API key with server-side encryption.
+ * Encrypts the plaintext value using AES-256-GCM with the env key.
+ */
+export const storeValue = mutation({
+  args: {
+    namespace: v.any(),
+    keyName: v.string(),
+    value: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const secret = getEncryptionKey();
+    const { encryptedValue, iv } = await encryptInternal(args.value, secret);
+    const now = Date.now();
+
+    const existing = await ctx.db
+      .query("encryptedKeys")
+      .withIndex("by_namespace_keyName", (q) =>
+        q.eq("namespace", args.namespace).eq("keyName", args.keyName)
+      )
+      .first();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        encryptedValue,
+        iv,
+        updatedAt: now,
+      });
+    } else {
+      await ctx.db.insert("encryptedKeys", {
+        namespace: args.namespace,
+        keyName: args.keyName,
+        encryptedValue,
+        iv,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    return null;
+  },
+});
+
+/**
+ * Retrieve and decrypt a stored third-party API key.
+ * Decrypts server-side using the env key — works in queries.
+ */
+export const getValue = query({
+  args: {
+    namespace: v.any(),
+    keyName: v.string(),
+  },
+  returns: v.union(v.string(), v.null()),
+  handler: async (ctx, args) => {
+    const record = await ctx.db
+      .query("encryptedKeys")
+      .withIndex("by_namespace_keyName", (q) =>
+        q.eq("namespace", args.namespace).eq("keyName", args.keyName)
+      )
+      .first();
+
+    if (!record) return null;
+
+    const secret = getEncryptionKey();
+    return await decryptInternal(record.encryptedValue, record.iv, secret);
+  },
+});
+
+/**
+ * Store an encrypted third-party API key (pre-encrypted).
+ * For cases where encryption is done client-side.
  */
 export const storeEncryptedKey = mutation({
   args: {
-    namespace: v.string(),
+    namespace: v.any(),
     keyName: v.string(),
     encryptedValue: v.string(),
     iv: v.string(),
@@ -422,7 +586,6 @@ export const storeEncryptedKey = mutation({
   handler: async (ctx, args) => {
     const now = Date.now();
 
-    // Check if key already exists
     const existing = await ctx.db
       .query("encryptedKeys")
       .withIndex("by_namespace_keyName", (q) =>
@@ -456,7 +619,7 @@ export const storeEncryptedKey = mutation({
  */
 export const getEncryptedKey = query({
   args: {
-    namespace: v.string(),
+    namespace: v.any(),
     keyName: v.string(),
   },
   returns: v.union(
@@ -492,7 +655,7 @@ export const getEncryptedKey = query({
  */
 export const deleteEncryptedKey = mutation({
   args: {
-    namespace: v.string(),
+    namespace: v.any(),
     keyName: v.string(),
   },
   returns: v.boolean(),
@@ -516,7 +679,7 @@ export const deleteEncryptedKey = mutation({
  */
 export const listEncryptedKeys = query({
   args: {
-    namespace: v.string(),
+    namespace: v.any(),
   },
   returns: v.array(
     v.object({

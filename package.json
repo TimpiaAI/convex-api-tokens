@@ -1,6 +1,6 @@
 {
   "name": "convex-api-tokens",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Convex component for API token management: issuance, validation, rotation, revocation, and encrypted third-party key storage",
   "type": "module",
   "license": "MIT",
@@ -15,6 +15,10 @@
     ".": {
       "types": "./dist/client/index.d.ts",
       "default": "./dist/client/index.js"
+    },
+    "./react": {
+      "types": "./dist/client/react.d.ts",
+      "default": "./dist/client/react.js"
     },
     "./test": "./src/test.ts",
     "./_generated/component.js": {
@@ -37,7 +41,13 @@
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "convex": "^1.24.0"
+    "convex": "^1.24.0",
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "convex": "^1.32.0",
